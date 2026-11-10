@@ -9,6 +9,7 @@ const CONFIG = {
   stopName: "Bef Kim Keat Lane",
   stop: { lat: 1.32456, lng: 103.85327 },
   radiusKm: 4,
+  homeMaxKm: 2,        // the "at your stop" gauge must be this close, else UNSURE
   walkMin: 8,
   recentMin: 15,       // gauge counts as "wet" if it recorded rain in the last 15 min
   staleMin: 20,        // rain data older than this is not trusted
@@ -38,38 +39,59 @@ function sgDate(now) {
 
 // Summarise rain readings into per-station state around the stop.
 // readings: [{timestamp, data:[{stationId, value}]}] in any order.
+// Readings are often published partially (a few stations first, the rest minutes
+// later), so each gauge is judged on its own reports: a gauge missing from a reading
+// is "unknown", never "dry". Data age is the age of the home gauge's latest report.
 function summariseRain(stations, readings, cfg, now) {
-  const sorted = readings
-    .map(r => ({ t: new Date(r.timestamp).getTime(), data: r.data }))
-    .filter(r => !Number.isNaN(r.t))
+  const sorted = (readings || [])
+    .map(r => ({ t: new Date(r && r.timestamp).getTime(), data: Array.isArray(r && r.data) ? r.data : [] }))
+    .filter(r => !Number.isNaN(r.t) && r.t <= now.getTime() + 5 * MIN)
     .sort((a, b) => b.t - a.t);
   if (!sorted.length) return { error: "No rain readings returned." };
-  const latestT = sorted[0].t;
-  const recent = sorted.filter(r => r.t > latestT - cfg.recentMin * MIN);
 
-  const gauges = stations
+  const gauges = (stations || [])
+    .filter(s => s && s.id && s.location && Number.isFinite(s.location.latitude) && Number.isFinite(s.location.longitude))
     .map(s => ({
       id: s.id,
-      name: s.name,
+      name: s.name || s.id,
       dist: km(cfg.stop, { lat: s.location.latitude, lng: s.location.longitude }),
     }))
     .sort((a, b) => a.dist - b.dist);
-  if (!gauges.length) return { error: "No rain gauges listed." };
 
+  const cutoff = now.getTime() - cfg.staleMin * MIN;
+  if (sorted[0].t < cutoff) return { error: `Rain data is ${Math.round((now.getTime() - sorted[0].t) / MIN)} min old.` };
   for (const g of gauges) {
-    const vals = recent.map(r => {
-      const hit = r.data.find(d => d.stationId === g.id);
-      return hit ? hit.value : null;
-    });
-    g.now = vals[0];                                   // latest reading (null = no report)
-    g.recentMm = vals.reduce((s, v) => s + (v || 0), 0);
-    g.wetNow = vals[0] > 0;
-    g.wetRecent = vals.some(v => v > 0);
-    g.reported = vals.some(v => v !== null);
+    // this gauge's own reports, newest first, within the stale window
+    const reports = [];
+    for (const r of sorted) {
+      if (r.t < cutoff) break;
+      const hit = r.data.find(d => d && d.stationId === g.id);
+      if (hit && Number.isFinite(hit.value)) reports.push({ t: r.t, v: hit.value });
+    }
+    g.reported = reports.length > 0;
+    g.lastT = g.reported ? reports[0].t : null;
+    g.now = g.reported ? reports[0].v : null;
+    const recent = reports.filter(x => x.t > sorted[0].t - cfg.recentMin * MIN);
+    g.recentMm = recent.reduce((s, x) => s + x.v, 0);
+    g.wetNow = g.now > 0;
+    g.wetRecent = recent.some(x => x.v > 0);
   }
-  const home = gauges.find(g => g.reported) || gauges[0];
+  // Home = nearest gauge, within homeMaxKm, that has reported recently.
+  const home = gauges.find(g => g.dist <= cfg.homeMaxKm && g.reported);
+  if (!home) {
+    const near = gauges.find(g => g.dist <= cfg.homeMaxKm);
+    return { error: near ? `${near.name} gauge hasn't reported in ${cfg.staleMin} min.` : "No rain gauge near your stop." };
+  }
   const ring = gauges.filter(g => g !== home && g.dist <= cfg.radiusKm);
-  return { latestT, home, ring, ageMin: (now.getTime() - latestT) / MIN };
+  return { latestT: home.lastT, home, ring, ageMin: (now.getTime() - home.lastT) / MIN };
+}
+
+// True when the readings don't reach back far enough to judge "recent" rain
+// (just after midnight, when today's list holds only a few readings).
+function needsYesterday(readings, cfg) {
+  const ts = (readings || []).map(r => new Date(r && r.timestamp).getTime()).filter(t => !Number.isNaN(t));
+  if (!ts.length) return true;
+  return Math.max(...ts) - Math.min(...ts) < cfg.recentMin * MIN;
 }
 
 // Pick the forecast for the area nearest the stop.
@@ -79,10 +101,12 @@ function pickForecast(fc, cfg) {
   const areas = fc && fc.area_metadata;
   if (!item || !item.forecasts || !areas || !areas.length) return null;
   const nearest = areas
+    .filter(a => a && a.label_location && Number.isFinite(a.label_location.latitude))
     .map(a => ({ name: a.name, dist: km(cfg.stop, { lat: a.label_location.latitude, lng: a.label_location.longitude }) }))
     .sort((a, b) => a.dist - b.dist)[0];
-  const f = item.forecasts.find(x => x.area === nearest.name);
-  if (!f) return null;
+  if (!nearest) return null;
+  const f = item.forecasts.find(x => x && x.area === nearest.name);
+  if (!f || typeof f.forecast !== "string") return null;
   return {
     area: nearest.name,
     text: f.forecast,
@@ -101,6 +125,7 @@ function decide(rain, forecast, cfg) {
   }
   const { home, ring } = rain;
   const wet = ring.filter(g => g.wetRecent).sort((a, b) => a.dist - b.dist);
+  const wetNow = wet.filter(g => g.wetNow);
   const fcNote = forecast && forecast.rainy ? ` Forecast for ${forecast.area}: ${forecast.text}.` : "";
 
   if (home.wetNow) {
@@ -109,7 +134,7 @@ function decide(rain, forecast, cfg) {
   }
   if (home.wetRecent) {
     return { v: "hurry", word: "HURRY", margin: "It rained here in the last 15 min and may start again.",
-      why: `${home.name} is dry in the latest reading.${wet.length ? ` Still raining at ${names(wet)}.` : ""}${fcNote}` };
+      why: `${home.name} is dry in the latest reading.${wetNow.length ? ` Still raining at ${names(wetNow)}.` : ""}${fcNote}` };
   }
   if (wet.length) {
     return { v: "hurry", word: "HURRY", margin: `Leave now: about ${cfg.minLeadMin}–${cfg.typicalLeadMin} min before rain reaches you. Your walk is ${cfg.walkMin} min.`,
@@ -147,19 +172,78 @@ async function getJSON(url, ms = 8000) {
   const timer = setTimeout(() => ctl.abort(), ms);
   try {
     const r = await fetch(url, { signal: ctl.signal, cache: "no-store" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // data.gov.sg sends {code, errorMsg} with error statuses, e.g. 404 "Data not found".
+      let msg = `HTTP ${r.status}`;
+      try { const j = await r.json(); if (j && j.errorMsg) msg += ` ${j.errorMsg}`; } catch (e) {}
+      throw new Error(msg);
+    }
     return await r.json();
   } finally {
     clearTimeout(timer);
   }
 }
 
+// data.gov.sg returns HTTP 200 with {code != 0, errorMsg} on some failures.
+async function getGovData(url) {
+  const j = await getJSON(url);
+  if (!j || j.code !== 0 || !j.data) throw new Error((j && j.errorMsg) || "Bad response");
+  return j.data;
+}
+
 async function fetchRain(now) {
-  const j = await getJSON(`${RAIN_URL}?date=${sgDate(now)}`);
-  let d = j && j.data;
-  // Just after midnight today's list can be empty: fall back to the latest reading.
-  if (!d || !d.readings || !d.readings.length) d = (await getJSON(RAIN_URL)).data;
-  return d;
+  let d;
+  try {
+    d = await getGovData(`${RAIN_URL}?date=${sgDate(now)}`);
+  } catch (e) {
+    // Just after midnight, today's date returns "Data not found": use yesterday's.
+    if (!/not found/i.test(e.message)) throw e;
+    d = { stations: [], readings: [] };
+  }
+  const stations = d.stations || [];
+  let readings = d.readings || [];
+  // Just after midnight today's list is too short to see the last 15 min: add yesterday's.
+  if (needsYesterday(readings, CONFIG)) {
+    const y = await getGovData(`${RAIN_URL}?date=${sgDate(new Date(now.getTime() - 24 * 60 * MIN))}`);
+    readings = readings.concat(y.readings || []);
+    if (!stations.length) stations.push(...(y.stations || []));
+  }
+  return { stations, readings };
+}
+
+const PENDING_KEY = "btr:pending";
+const PENDING_MAX_MIN = 120;
+
+function readPending(nowMs) {
+  try {
+    const p = JSON.parse(localStorage.getItem(PENDING_KEY));
+    return p && nowMs - p.t <= PENDING_MAX_MIN * MIN ? p : null;
+  } catch (e) { return null; }
+}
+function writePending(p) {
+  try { p ? localStorage.setItem(PENDING_KEY, JSON.stringify(p)) : localStorage.removeItem(PENDING_KEY); } catch (e) {}
+}
+
+// Which verdict a trip gets logged against.
+// On hide: remember the verdict on screen, unless a trip is already locked in or
+// was just logged. On return after at least a walk's time away, lock it in, so
+// checking the page again after the walk can't overwrite it.
+const RELOG_GUARD_MIN = 30;
+function pendingOnHide(pending, verdict, nowMs, lastLoggedAt) {
+  if (lastLoggedAt && nowMs - lastLoggedAt < RELOG_GUARD_MIN * MIN) return pending;
+  if (pending && pending.locked) return pending;
+  if (!verdict || verdict.v === "unsure") return null;
+  return { t: nowMs, word: verdict.word };
+}
+// A check more than LOCK_MAX_MIN ago wasn't the departure (you'd have logged by
+// now), so it's dropped instead of locked; the next hide records a fresh one.
+const LOCK_MAX_MIN = 45;
+function pendingOnShow(pending, nowMs, cfg) {
+  if (!pending || pending.locked) return pending;
+  const age = nowMs - pending.t;
+  if (age > LOCK_MAX_MIN * MIN) return null;
+  if (age >= cfg.walkMin * MIN) return { ...pending, locked: true };
+  return pending;
 }
 
 function readLog() {
@@ -184,7 +268,8 @@ function logSummary(log) {
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
   let lastVerdict = null;
-  let lastLoad = 0;
+  let lastLoad = 0;      // last successful load
+  let lastAttempt = 0;   // last load attempt, for rate limiting
   let loading = false;
 
   const fmt = t => new Date(t).toLocaleTimeString("en-SG", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Singapore" });
@@ -192,11 +277,33 @@ if (typeof document !== "undefined") {
 
   $("trip").textContent = `Stop ${CONFIG.stopCode} · ${CONFIG.walkMin}-min walk`;
 
+  // Only touch the live region when something changed, so screen readers
+  // don't re-announce the same verdict on every refresh.
   function renderVerdict(v) {
     $("verdict").dataset.v = v.v;
-    setText("v-word", v.word);
-    setText("v-margin", v.margin);
-    setText("v-why", v.why);
+    for (const [id, s] of [["v-word", v.word], ["v-margin", v.margin], ["v-why", v.why]]) {
+      if ($(id).textContent !== s) setText(id, s);
+    }
+  }
+
+  // The trip is logged against the verdict shown when you left the page (locked in
+  // when you come back after the walk), not whatever it says after the walk.
+  function renderPending() {
+    const p = readPending(Date.now());
+    $("log-dry").disabled = $("log-wet").disabled = !p;
+    $("log-discard").hidden = !p;
+    $("log-pending").textContent = p
+      ? `Will log against ${p.word}, shown at ${fmt(p.t)}.`
+      : "Check the page before you leave, then log here after your walk.";
+  }
+
+  const LOGGED_KEY = "btr:lastLogged";
+  const readLastLogged = () => { try { return Number(localStorage.getItem(LOGGED_KEY)) || 0; } catch (e) { return 0; } };
+  const writeLastLogged = t => { try { localStorage.setItem(LOGGED_KEY, String(t)); } catch (e) {} };
+
+  function showUnsure(margin, why) {
+    lastVerdict = null;
+    renderVerdict({ v: "unsure", word: "UNSURE", margin, why });
   }
 
   function renderGauges(rain) {
@@ -239,36 +346,55 @@ if (typeof document !== "undefined") {
 
   async function load(force) {
     if (loading) return;
-    if (!force && Date.now() - lastLoad < 30 * 1000) return;
+    // data.gov.sg rate-limits bursts, so even a forced refresh waits 15 s.
+    const wait = (force ? 15 : 30) * 1000 - (Date.now() - lastAttempt);
+    if (wait > 0) {
+      if (force) setText("status", `Just checked. Try again in ${Math.ceil(wait / 1000)} s.`);
+      return;
+    }
+    lastAttempt = Date.now();
     loading = true;
     $("refresh").disabled = true;
     setText("status", "Updating…");
-    const now = new Date();
-    const [rainR, fcR, busR] = await Promise.allSettled([
-      fetchRain(now), getJSON(FORECAST_URL), getJSON(BUS_URL + encodeURIComponent(CONFIG.stopCode)),
-    ]);
-    const rain = rainR.status === "fulfilled"
-      ? summariseRain(rainR.value.stations || [], rainR.value.readings || [], CONFIG, new Date())
-      : { error: "Rain data request failed." };
-    const fc = fcR.status === "fulfilled" ? pickForecast(fcR.value.data, CONFIG) : null;
-    const v = decide(rain, fc, CONFIG);
-    lastVerdict = v;
-    renderVerdict(v);
-    renderGauges(rain);
-    renderForecast(fc, fcR.status !== "fulfilled");
-    renderBuses(busR.status === "fulfilled" ? nextBuses(busR.value, new Date()) : [], busR.status !== "fulfilled");
-    lastLoad = Date.now();
-    setText("status", `Checked at ${fmt(lastLoad)}. Refreshes every 2 min while open.`);
-    $("refresh").disabled = false;
-    loading = false;
+    try {
+      const now = new Date();
+      const [rainR, fcR, busR] = await Promise.allSettled([
+        fetchRain(now), getGovData(FORECAST_URL), getJSON(BUS_URL + encodeURIComponent(CONFIG.stopCode)),
+      ]);
+      const rain = rainR.status === "fulfilled"
+        ? summariseRain(rainR.value.stations, rainR.value.readings, CONFIG, new Date())
+        : { error: "Rain data request failed." };
+      const fc = fcR.status === "fulfilled" ? pickForecast(fcR.value, CONFIG) : null;
+      const v = decide(rain, fc, CONFIG);
+      lastVerdict = v;
+      renderVerdict(v);
+      renderGauges(rain);
+      renderForecast(fc, fcR.status !== "fulfilled");
+      renderBuses(busR.status === "fulfilled" ? nextBuses(busR.value, new Date()) : [], busR.status !== "fulfilled");
+      lastLoad = Date.now();
+      setText("status", `Checked at ${fmt(lastLoad)}. Refreshes every 2 min while open.`);
+    } catch (e) {
+      showUnsure("Something went wrong reading the data.", String((e && e.message) || e));
+      renderGauges(null);
+      renderForecast(null, true);
+      renderBuses([], true);
+      setText("status", "Update failed. Tap Refresh to try again.");
+    } finally {
+      $("refresh").disabled = false;
+      loading = false;
+    }
   }
 
   function addLog(outcome) {
-    if (!lastVerdict || lastVerdict.v === "unsure") { setText("log-summary", "No verdict to log yet."); return; }
+    const p = readPending(Date.now());
+    if (!p) { renderPending(); return; }
     const log = readLog();
-    log.push({ t: Date.now(), word: lastVerdict.word, outcome });
+    log.push({ t: p.t, loggedAt: Date.now(), word: p.word, outcome });
     if (!writeLog(log)) { setText("log-summary", "Couldn't save: this browser blocks storage."); return; }
-    setText("log-summary", `Logged "${outcome === "dry" ? "stayed dry" : "got wet"}" after ${lastVerdict.word}. ${logSummary(log)}`);
+    writePending(null);
+    writeLastLogged(Date.now());
+    renderPending();
+    setText("log-summary", `Logged "${outcome === "dry" ? "stayed dry" : "got wet"}" after ${p.word}. ${logSummary(log)}`);
   }
 
   $("refresh").addEventListener("click", () => load(true));
@@ -277,13 +403,28 @@ if (typeof document !== "undefined") {
   $("log-clear").addEventListener("click", () => {
     if (confirm("Clear all logged trips?")) { writeLog([]); setText("log-summary", logSummary([])); }
   });
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") load(false); });
+  $("log-discard").addEventListener("click", () => { writePending(null); renderPending(); });
+  document.addEventListener("visibilitychange", () => {
+    const now = Date.now();
+    if (document.visibilityState === "hidden") {
+      writePending(pendingOnHide(readPending(now), lastVerdict, now, readLastLogged()));
+    } else {
+      writePending(pendingOnShow(readPending(now), now, CONFIG));
+      renderPending();
+      // Don't leave an old verdict on screen while the new one loads.
+      if (now - lastLoad > CONFIG.staleMin * MIN) showUnsure("Checking…", "The last check was a while ago.");
+      load(false);
+    }
+  });
   setInterval(() => { if (document.visibilityState === "visible") load(true); }, 2 * 60 * 1000);
 
   setText("log-summary", logSummary(readLog()));
+  // A home-screen app is often relaunched from scratch after the walk, so lock here too.
+  writePending(pendingOnShow(readPending(Date.now()), Date.now(), CONFIG));
+  renderPending();
   load(true);
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { CONFIG, km, sgDate, summariseRain, pickForecast, decide, nextBuses, logSummary };
+  module.exports = { CONFIG, km, sgDate, summariseRain, needsYesterday, pickForecast, decide, nextBuses, logSummary, pendingOnHide, pendingOnShow };
 }

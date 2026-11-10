@@ -10,6 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="Beat the Rain">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
 :root{
   --bg:#F5F7F9; --card:#FFFFFF; --ink:#14202E; --muted:#56657A; --rule:#D5DCE5;
@@ -91,12 +92,16 @@ button:disabled{opacity:.5;cursor:default}
 
   <section class="card">
     <h2>After your walk</h2>
+    <div id="log-pending" class="muted"></div>
     <div class="row">
       <button type="button" id="log-dry" class="ghost">Stayed dry</button>
       <button type="button" id="log-wet" class="ghost">Got wet</button>
     </div>
     <div id="log-summary" class="muted"></div>
-    <div class="row"><button type="button" id="log-clear" class="ghost small">Clear log</button></div>
+    <div class="row">
+      <button type="button" id="log-discard" class="ghost small" hidden>Not a trip, discard</button>
+      <button type="button" id="log-clear" class="ghost small">Clear log</button>
+    </div>
   </section>
 
   <button type="button" id="refresh">Refresh</button>
