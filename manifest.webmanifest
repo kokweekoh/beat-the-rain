@@ -1,0 +1,9 @@
+{
+  "name": "Beat the Rain",
+  "short_name": "Beat the Rain",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#F5F7F9",
+  "theme_color": "#14202E",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

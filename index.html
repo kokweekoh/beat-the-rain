@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Beat the Rain</title>
+<meta name="description" content="Leave now or wait? Rain near your bus stop, from live rain gauges.">
+<meta name="theme-color" content="#14202E">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Beat the Rain">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#F5F7F9; --card:#FFFFFF; --ink:#14202E; --muted:#56657A; --rule:#D5DCE5;
+  --go:#1E7A4F; --go-soft:#E3F3EA; --hurry:#B25E00; --hurry-soft:#FDF0DC;
+  --wait:#C2263A; --wait-soft:#FBE9EC; --unsure:#56657A; --unsure-soft:#ECEFF3;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0F151D; --card:#161F2A; --ink:#E6ECF2; --muted:#9AA8B8; --rule:#2A3747;
+  --go:#5FC994; --go-soft:#16302A; --hurry:#F2A54A; --hurry-soft:#3A2A14;
+  --wait:#F0677A; --wait-soft:#3A1C23; --unsure:#9AA8B8; --unsure-soft:#1E2834;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0F151D; --card:#161F2A; --ink:#E6ECF2; --muted:#9AA8B8; --rule:#2A3747;
+  --go:#5FC994; --go-soft:#16302A; --hurry:#F2A54A; --hurry-soft:#3A2A14;
+  --wait:#F0677A; --wait-soft:#3A1C23; --unsure:#9AA8B8; --unsure-soft:#1E2834;
+  color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+main{max-width:520px;margin:0 auto;display:grid;gap:14px}
+header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-size:15px;margin:0;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.trip{font-size:14px;color:var(--muted)}
+.verdict{border-radius:14px;padding:22px 20px;display:grid;gap:8px;background:var(--unsure-soft);border:2px solid var(--unsure)}
+.verdict .word{font-size:clamp(44px,15vw,64px);font-weight:800;line-height:1;letter-spacing:-.02em;color:var(--unsure)}
+.verdict .margin{font-size:19px;font-weight:600}
+.verdict .why{font-size:15px;color:var(--muted)}
+.verdict[data-v="go"]{background:var(--go-soft);border-color:var(--go)} .verdict[data-v="go"] .word{color:var(--go)}
+.verdict[data-v="hurry"]{background:var(--hurry-soft);border-color:var(--hurry)} .verdict[data-v="hurry"] .word{color:var(--hurry)}
+.verdict[data-v="wait"]{background:var(--wait-soft);border-color:var(--wait)} .verdict[data-v="wait"] .word{color:var(--wait)}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:12px;padding:14px 16px;display:grid;gap:6px}
+.card h2{font-size:13px;margin:0;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.buses{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:16px}
+.buses b{font-variant-numeric:tabular-nums}
+ul.gauges{margin:0;padding:0;list-style:none;font-size:15px;display:grid;gap:2px}
+ul.gauges li{display:flex;justify-content:space-between;gap:10px}
+ul.gauges .wet{color:var(--wait);font-weight:600}
+.muted{color:var(--muted);font-size:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+button{font:inherit;font-weight:600;font-size:16px;border-radius:10px;padding:12px 16px;cursor:pointer;
+  border:1.5px solid var(--ink);background:var(--ink);color:var(--bg);flex:1;min-height:48px}
+button.ghost{background:transparent;color:var(--ink)}
+button.small{flex:0 0 auto;font-size:14px;padding:6px 12px;min-height:0}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:3px solid var(--hurry);outline-offset:2px}
+.status{font-size:13px;color:var(--muted);text-align:center}
+.warn{color:var(--wait);font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Beat the Rain</h1>
+    <span class="trip" id="trip"></span>
+  </header>
+
+  <section class="verdict" id="verdict" data-v="unsure" aria-live="polite">
+    <div class="word" id="v-word">…</div>
+    <div class="margin" id="v-margin">Checking rain gauges near your stop</div>
+    <div class="why" id="v-why"></div>
+  </section>
+
+  <section class="card">
+    <h2>Next buses at your stop</h2>
+    <div class="buses" id="buses"><span class="muted">Loading…</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Forecast</h2>
+    <div id="forecast" class="muted">Loading…</div>
+  </section>
+
+  <section class="card">
+    <h2>Rain gauges nearby <span id="g-asof"></span></h2>
+    <ul class="gauges" id="gauges"><li class="muted">Loading…</li></ul>
+  </section>
+
+  <section class="card">
+    <h2>After your walk</h2>
+    <div class="row">
+      <button type="button" id="log-dry" class="ghost">Stayed dry</button>
+      <button type="button" id="log-wet" class="ghost">Got wet</button>
+    </div>
+    <div id="log-summary" class="muted"></div>
+    <div class="row"><button type="button" id="log-clear" class="ghost small">Clear log</button></div>
+  </section>
+
+  <button type="button" id="refresh">Refresh</button>
+  <p class="status" id="status"></p>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
